@@ -7,6 +7,16 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 
+
+from django.views import View
+from django.shortcuts import render, redirect
+from django.http import JsonResponse, Http404
+from django.utils import timezone
+from .forms import TrainingForm
+from .models import TrainingJob
+from .training import run_training
+import threading
+
 from .forms import GenerateForm, ClassifyForm, DetectForm
 from .models import GeneratedImage, UploadedImage
 from .serializers import GeneratedImageSerializer, UploadedImageSerializer
@@ -44,8 +54,8 @@ class HomeView(View):
                 # fast: 256px/1 step; HQ: 512px/2–4 steps
                 img = generate_image(
                     prompt,
-                    height=1024 if hq else 256,
-                    width=1024 if hq else 256,
+                    height=512 if hq else 256,
+                    width=512 if hq else 256,
                     num_inference_steps=3 if hq else 1,
                 )
                 # Save to model
@@ -141,3 +151,48 @@ class DetectAPI(APIView):
         up.result_json = {"detections": det, "annotated": str(annotated_rel)}
         up.save()
         return Response(UploadedImageSerializer(up).data)
+
+
+class TrainCreateView(View):
+    template_name = "vision/train.html"
+
+    def get(self, request):
+        return render(request, self.template_name, {"form": TrainingForm(), "jobs": TrainingJob.objects.order_by("-created_at")[:20]})
+
+    def post(self, request):
+        form = TrainingForm(request.POST, request.FILES)
+        if not form.is_valid():
+            return render(request, self.template_name, {"form": form, "jobs": TrainingJob.objects.order_by("-created_at")[:20]})
+
+        job = TrainingJob.objects.create(
+            job_type=form.cleaned_data["job_type"],
+            dataset_zip=form.cleaned_data.get("dataset_zip"),
+            dataset_path=form.cleaned_data.get("dataset_path") or "",
+            hyperparams={
+                "epochs": form.cleaned_data["epochs"],
+                "batch_size": form.cleaned_data["batch_size"],
+                "image_size": form.cleaned_data["image_size"],
+            },
+            status="queued",
+        )
+        # kick off the background thread
+        threading.Thread(target=run_training, args=(job.id,), daemon=True).start()
+
+        return redirect("train")
+
+class TrainStatusAPI(View):
+    def get(self, request, job_id: int):
+        try:
+            job = TrainingJob.objects.get(id=job_id)
+        except TrainingJob.DoesNotExist:
+            raise Http404("Job not found")
+        return JsonResponse({
+            "id": job.id,
+            "status": job.status,
+            "metrics": job.metrics,
+            "output_path": job.output_path,
+            "log": job.log[-5000:],  # tail
+            "created_at": job.created_at,
+            "started_at": job.started_at,
+            "finished_at": job.finished_at,
+        })

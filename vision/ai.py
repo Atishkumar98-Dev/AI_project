@@ -3,7 +3,10 @@ from PIL import Image
 from pathlib import Path
 import io
 import json
-
+from torch import nn
+# add near the top
+from django.conf import settings
+from pathlib import Path as _Path
 # --- Classification (ResNet-50) ---
 from torchvision import models, transforms
 
@@ -14,6 +17,27 @@ from ultralytics import YOLO
 from diffusers import AutoPipelineForText2Image
 
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+# Face detector (optional speed/accuracy boost for face ID)
+try:
+    from facenet_pytorch import MTCNN
+    _MTCNN = MTCNN(keep_all=False, device=_DEVICE if _DEVICE != "cpu" else "cpu")
+except Exception:
+    _MTCNN = None  # fallback if package isn't installed
+
+def _crop_face(pil):
+    """Crop the largest detected face; fallback to original image."""
+    if _MTCNN is None:
+        return pil
+    boxes, _ = _MTCNN.detect(pil)
+    if boxes is not None and len(boxes) > 0 and boxes[0] is not None:
+        x1, y1, x2, y2 = [int(v) for v in boxes[0]]
+        # clamp to image bounds
+        w, h = pil.size
+        x1 = max(0, min(x1, w - 1)); x2 = max(0, min(x2, w))
+        y1 = max(0, min(y1, h - 1)); y2 = max(0, min(y2, h))
+        if x2 > x1 and y2 > y1:
+            return pil.crop((x1, y1, x2, y2))
+    return pil
 
 # Lazy singletons to avoid loading models on every request
 _RESNET = None
@@ -39,9 +63,28 @@ _IMAGENET_MINI = {0: "tench", 1: "goldfish", 2: "great white shark"}  # placehol
 #     _IMAGENET_IDX = None
 
 from torchvision import models
+def _load_custom_classifier_if_any(img_size_default=256):
+    global _CUSTOM_CLS, _CUSTOM_META
+    models_dir = _Path(settings.MEDIA_ROOT) / "models"
+    candidates = sorted(models_dir.glob("classifier_job*_best.pt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if candidates:
+        ckpt = torch.load(candidates[0], map_location=_DEVICE)
+        classes = ckpt.get("classes", [])
+        img_size = ckpt.get("img_size", img_size_default)
+        model = models.resnet18(weights=None)
+        model.fc = nn.Linear(model.fc.in_features, len(classes))
+        model.load_state_dict(ckpt["state_dict"])
+        model.eval().to(_DEVICE)
+        _CUSTOM_CLS, _CUSTOM_META = model, {"classes": classes, "img_size": img_size}
+
+# in _ensure_resnet(), try custom first
 def _ensure_resnet():
     global _RESNET
     if _RESNET is None:
+        _load_custom_classifier_if_any()
+        if _CUSTOM_CLS is not None:
+            _RESNET = _CUSTOM_CLS
+            return _RESNET
         model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
         model.eval().to(_DEVICE)
         _RESNET = model
@@ -82,22 +125,42 @@ def _ensure_sd():
     return _SD_PIPE
 
 
+@torch.inference_mode()
+def generate_image(prompt: str, height: int = 512, width: int = 512, num_inference_steps: int = 2):
+    pipe = _ensure_sd()
+    # SD-Turbo works best with very few steps
+    image = pipe(
+        prompt=prompt,
+        height=height,
+        width=width,
+        num_inference_steps=num_inference_steps,
+        guidance_scale=0.0,  # CFG off for turbo
+    ).images[0]
+    return image
 
+CUSTOM_META = None  # {"classes": [...], "img_size": 256}
 @torch.inference_mode()
 def classify_image(pil_image: Image.Image, topk: int = 5):
+    # NEW: crop face before transforms (boosts accuracy for face ID tasks)
+    pil_image = _crop_face(pil_image)
+
     model = _ensure_resnet()
     tensor = _IMG_TFMS(pil_image).unsqueeze(0).to(_DEVICE)
     logits = model(tensor)
     probs = torch.softmax(logits, dim=1).squeeze(0)
+    topk = min(topk, probs.numel())
     topk_probs, topk_idxs = torch.topk(probs, k=topk)
     topk_probs = topk_probs.tolist()
     topk_idxs = [int(i) for i in topk_idxs.tolist()]
-    # Labels: try torchvision metadata (available via weights meta)
+
+    # Labels: use torchvision categories; if you added custom classes, keep your logic here
     try:
-        categories = models.ResNet50_Weights.DEFAULT.meta["categories"]
-        labels = [categories[i] for i in topk_idxs]
+        from torchvision import models as _tv_models
+        categories = _tv_models.ResNet18_Weights.DEFAULT.meta["categories"]
+        labels = [categories[i] if i < len(categories) else f"class_{i}" for i in topk_idxs]
     except Exception:
-        labels = [_IMAGENET_MINI.get(i, f"class_{i}") for i in topk_idxs]
+        labels = [f"class_{i}" for i in topk_idxs]
+
     return [{"label": lab, "prob": float(p)} for lab, p in zip(labels, topk_probs)]
 
 
@@ -133,15 +196,3 @@ def detect_objects(pil_image: Image.Image, save_annotated_path: Path | None = No
     return out
 
 
-@torch.inference_mode()
-def generate_image(prompt: str, height: int = 512, width: int = 512, num_inference_steps: int = 2):
-    pipe = _ensure_sd()
-    # SD-Turbo works best with very few steps
-    image = pipe(
-        prompt=prompt,
-        height=height,
-        width=width,
-        num_inference_steps=num_inference_steps,
-        guidance_scale=0.0,  # CFG off for turbo
-    ).images[0]
-    return image
