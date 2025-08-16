@@ -118,7 +118,7 @@ Open **http://127.0.0.1:8005/**
 
 ---
 
-## ELI5 (Explain Like I'm 5)
+## ELI5 
 
 **Think of it like a kitchen:**  
 - **`ai.py`** is the **chef**. It knows recipes for making pictures (generation), tasting pictures (classification), and finding things in pictures (detection).  
