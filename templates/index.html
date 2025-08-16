@@ -1,0 +1,92 @@
+
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>AI Vision Demo</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu; margin:20px;}
+    .card{border:1px solid #ddd; border-radius:14px; padding:16px; margin-bottom:20px; box-shadow:0 2px 8px rgba(0,0,0,.05)}
+    h2{margin:0 0 12px 0}
+    .row{display:grid; gap:16px; grid-template-columns:repeat(auto-fit,minmax(320px,1fr))}
+    img{max-width:100%; height:auto; border-radius:12px; border:1px solid #eee;}
+    code{background:#f6f6f6; padding:2px 6px; border-radius:6px}
+    .result {margin-top:10px;}
+    .btn{padding:8px 14px; border-radius:10px; border:1px solid #bbb; background:#fafafa; cursor:pointer}
+    textarea{width:100%}
+  </style>
+</head>
+<body>
+  <h1>AI Vision (Generate • Classify • Detect)</h1>
+
+  <div class="row">
+    <div class="card">
+      <h2>1) Generate image from text</h2>
+      <form method="post">{% csrf_token %}
+        {{ gen_form.as_p }}
+        <button class="btn" name="generate_submit" type="submit">Generate</button>
+        <label><input type="checkbox" name="hq"> High quality (slower)</label>
+      </form>
+      {% if generated %}
+        <div class="result">
+          <p><strong>Prompt:</strong> {{ generated.prompt }}</p>
+          <img src="{{ generated.image.url }}" alt="generated"/>
+          <p>File: <code>{{ generated.image.url }}</code></p>
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>2) Classify image</h2>
+      <form method="post" enctype="multipart/form-data">{% csrf_token %}
+        {{ cls_form.as_p }}
+        <button class="btn" name="classify_submit" type="submit">Classify</button>
+      </form>
+      {% if classified %}
+        <div class="result">
+          <img src="{{ classified.image.url }}" alt="uploaded"/>
+          <pre>{{ classified.result_json|json_script:"cls_json" }}</pre>
+          <script>
+            const cls = JSON.parse(document.getElementById("cls_json").textContent);
+            document.write("<ul>");
+            (cls.topk || []).forEach(x => {
+              document.write(`<li>${x.label}: ${(x.prob*100).toFixed(2)}%</li>`);
+            });
+            document.write("</ul>");
+          </script>
+        </div>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>3) Detect / recognize objects</h2>
+      <form method="post" enctype="multipart/form-data">{% csrf_token %}
+        {{ det_form.as_p }}
+        <button class="btn" name="detect_submit" type="submit">Detect</button>
+      </form>
+      {% if detected %}
+        <div class="result">
+          <img src="{{ detected.image.url }}" alt="uploaded"/>
+          {% if detected.result_json.annotated %}
+            <p>Annotated:</p>
+            <img src="/media/{{ detected.result_json.annotated }}" alt="annotated"/>
+          {% endif %}
+          <pre>{{ detected.result_json|json_script:"det_json" }}</pre>
+          <script>
+            const det = JSON.parse(document.getElementById("det_json").textContent);
+            document.write("<ul>");
+            (det.detections || []).forEach(d => {
+              document.write(`<li>${d.class} (${(d.confidence*100).toFixed(1)}%)</li>`);
+            });
+            document.write("</ul>");
+          </script>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <hr/>
+  <p><strong>API endpoints:</strong> <code>POST /api/generate</code> (JSON: {prompt}), <code>POST /api/classify</code> (multipart: image), <code>POST /api/detect</code> (multipart: image)</p>
+</body>
+</html>
